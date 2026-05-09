@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DeepSeek 极简用量看板
 // @namespace    http://tampermonkey.net/
-// @version      7.0
-// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，左侧展示双徽章（命中率与共计花费）。
+// @version      8.0
+// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，左侧展示双徽章（命中率与共计花费），UI细节极致打磨。
 // @author       Nahiyi
 // @match        https://platform.deepseek.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=deepseek.com
@@ -45,7 +45,6 @@
     }
 
     function checkAndRender() {
-        // 只有当用量和成本两个接口都拦截到数据时，才进行渲染
         if (capturedAmountData && capturedCostData) {
             initDashboardLayout();
             renderCards();
@@ -183,17 +182,16 @@
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                     <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 6px;">
                         <h3 style="margin: 0 0 4px 0; font-size: 18px; color: #111;">${modelName}</h3>
-                        <span style="font-size: 13px; color: #10b981; font-weight: 600; background: rgba(16,185,129,0.1); padding: 4px 8px; border-radius: 6px;">
+                        <span style="font-size: 12px; color: #10b981; font-weight: 600; background: rgba(16,185,129,0.1); padding: 3px 6px; border-radius: 4px;">
                             综合命中率: ${hitRate}
                         </span>
-                        <!-- 新增成本徽章，统一左侧视觉对齐 -->
-                        <span style="font-size: 13px; color: #ef4444; font-weight: 600; background: rgba(239,68,68,0.1); padding: 4px 8px; border-radius: 6px;">
+                        <span style="font-size: 12px; color: #ef4444; font-weight: 600; background: rgba(239,68,68,0.1); padding: 3px 6px; border-radius: 4px;">
                             共计花费: ${formatCurrency(costTotal)}
                         </span>
                     </div>
                     <div style="font-size: 14px; color: #555; text-align: right; line-height: 1.8;">
                         <div>输入命中: <span style="font-weight:600; color:#3b82f6; margin-left: 8px;">${formatUnit(hitTotal)}</span></div>
-                        <div>输入未命: <span style="font-weight:600; color:#94a3b8; margin-left: 8px;">${formatUnit(missTotal)}</span></div>
+                        <div>输入未命中: <span style="font-weight:600; color:#94a3b8; margin-left: 8px;">${formatUnit(missTotal)}</span></div>
                         <div>输出: <span style="font-weight:600; color:#f59e0b; margin-left: 8px;">${formatUnit(outTotal)}</span></div>
                         <div>成本: <span style="font-weight:600; color:#ef4444; margin-left: 8px;">${formatCurrency(costTotal)}</span></div>
                     </div>
