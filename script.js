@@ -1,157 +1,215 @@
 // ==UserScript==
-// @name         DeepSeek Usage Dashboard Enhancer
+// @name         DeepSeek V4 用量增强看板
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  增强 DeepSeek Token 用量显示：添加直观的中文单位、缓存命中率，并提取至全局面板，免除悬浮查看且不直观的烦恼。
+// @version      2.0
+// @description  在右侧构建极简趋势看板，支持单位转换、命中率分析及多维度时间切换。
 // @author       Nahiyi
 // @match        https://platform.deepseek.com/*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=deepseek.com
+// @require      https://cdn.jsdelivr.net/npm/chart.js
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // 中文数字单位格式化函数
-    function formatNumberWithUnit(numStr) {
-        const num = Number(numStr);
-        if (isNaN(num) || num === 0) return '0';
-        
-        if (num >= 10000000) return (num / 10000000).toFixed(2) + ' 千万';
-        if (num >= 1000000) return (num / 1000000).toFixed(2) + ' 百万';
-        if (num >= 100000) return (num / 100000).toFixed(2) + ' 十万';
-        if (num >= 10000) return (num / 10000).toFixed(2) + ' 万';
-        return num.toString();
+    let rawUsageData = null;
+    let currentRange = 'week'; // 默认一周
+
+    function formatUnit(numStr) {
+        const n = Number(numStr);
+        if (isNaN(n) || n === 0) return '0';
+        if (n < 10000) return n.toLocaleString();
+        if (n < 1000000) return (n / 10000).toFixed(1) + ' 万';
+        if (n < 100000000) return (n / 1000000).toFixed(1) + ' 百万';
+        return (n / 100000000).toFixed(2) + ' 亿';
     }
 
-    // 渲染极简风数据面板
-    function renderStatsPanel(data) {
-        // 避免重复渲染
-        if (document.getElementById('nahiyi-ds-enhancer-panel')) {
-            document.getElementById('nahiyi-ds-enhancer-panel').remove();
+    const getDS = (d) => d.toISOString().split('T')[0];
+
+    function getStats(range) {
+        if (!rawUsageData) return null;
+        const days = rawUsageData.data.biz_data.days;
+        const today = new Date("2026-05-09");
+        
+        let targetDays = [];
+        if (range === 'today') targetDays = [getDS(today)];
+        else if (range === 'yesterday') {
+            const yest = new Date(today);
+            yest.setDate(yest.getDate() - 1);
+            targetDays = [getDS(yest)];
+        } else if (range === 'week') {
+            for(let i=6; i>=0; i--) {
+                const d = new Date(today);
+                d.setDate(d.getDate() - i);
+                targetDays.push(getDS(d));
+            }
+        } else { // month
+            targetDays = days.map(d => d.date);
         }
 
-        const totalData = data?.data?.biz_data?.total;
-        if (!totalData || !Array.isArray(totalData)) return;
+        const models = ['deepseek-v4-pro', 'deepseek-v4-flash'];
+        let result = {};
 
-        // 构建面板容器 (毛玻璃极简UI)
-        const panel = document.createElement('div');
-        panel.id = 'nahiyi-ds-enhancer-panel';
-        panel.style.cssText = `
-            margin: 20px 0;
-            padding: 20px;
-            background: rgba(255, 255, 255, 0.6);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            border-radius: 12px;
-            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
-            display: flex;
-            gap: 24px;
-            flex-wrap: wrap;
-            z-index: 999;
-        `;
+        models.forEach(m => {
+            let hit = 0, miss = 0, out = 0;
+            let chartData = [];
+            let chartLabels = [];
 
-        totalData.forEach(modelData => {
-            const modelName = modelData.model;
-            // 过滤出我们需要关注的模型
-            if (!modelName.includes('pro') && !modelName.includes('flash')) return;
-
-            let cacheHit = 0;
-            let cacheMiss = 0;
-            let outputToken = 0;
-
-            modelData.usage.forEach(item => {
-                if (item.type === 'PROMPT_CACHE_HIT_TOKEN') cacheHit = Number(item.amount);
-                if (item.type === 'PROMPT_CACHE_MISS_TOKEN') cacheMiss = Number(item.amount);
-                if (item.type === 'RESPONSE_TOKEN') outputToken = Number(item.amount);
+            targetDays.forEach(dateStr => {
+                const dayObj = days.find(d => d.date === dateStr);
+                const modelUsage = dayObj?.data.find(du => du.model === m);
+                
+                let d_hit = 0, d_miss = 0, d_out = 0;
+                if (modelUsage) {
+                    d_hit = Number(modelUsage.usage.find(u => u.type === 'PROMPT_CACHE_HIT_TOKEN')?.amount || 0);
+                    d_miss = Number(modelUsage.usage.find(u => u.type === 'PROMPT_CACHE_MISS_TOKEN')?.amount || 0);
+                    d_out = Number(modelUsage.usage.find(u => u.type === 'RESPONSE_TOKEN')?.amount || 0);
+                }
+                hit += d_hit; miss += d_miss; out += d_out;
+                chartData.push(d_hit + d_miss + d_out);
+                chartLabels.push(dateStr.split('-').slice(1).join('/'));
             });
 
-            const totalInput = cacheHit + cacheMiss;
-            const hitRate = totalInput > 0 ? ((cacheHit / totalInput) * 100).toFixed(2) + '%' : '0.00%';
+            const totalIn = hit + miss;
+            result[m] = {
+                hit, miss, out,
+                hitRate: totalIn > 0 ? ((hit / totalIn) * 100).toFixed(1) + '%' : '0%',
+                chartData,
+                chartLabels,
+                displayDate: range === 'today' ? targetDays[0] : `${targetDays[0]} ~ ${targetDays[targetDays.length-1]}`
+            };
+        });
+        return result;
+    }
 
-            // 生成单个模型的卡片
-            const card = document.createElement('div');
-            card.style.cssText = `
-                flex: 1;
-                min-width: 280px;
-                padding: 16px;
-                background: rgba(255, 255, 255, 0.8);
-                border-radius: 8px;
-                border: 1px solid #eaeaea;
-            `;
+    function initUI() {
+        if (document.getElementById('ds-side-panel')) return;
 
-            card.innerHTML = `
-                <h3 style="margin: 0 0 12px 0; font-size: 16px; color: #1a1a1a; display: flex; justify-content: space-between;">
-                    <span>${modelName} 核心用量</span>
-                    <span style="color: #4CAF50; font-weight: 600;">命中率: ${hitRate}</span>
-                </h3>
-                <div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: #555;">
-                    <div style="display: flex; justify-content: space-between;">
-                        <span>📥 输入缓存命中:</span>
-                        <span style="font-weight: 500; color: #1a1a1a;">${formatNumberWithUnit(cacheHit)}</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between;">
-                        <span>📤 输入未命中:</span>
-                        <span style="font-weight: 500; color: #1a1a1a;">${formatNumberWithUnit(cacheMiss)}</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between;">
-                        <span>🚀 输出 Token:</span>
-                        <span style="font-weight: 500; color: #1a1a1a;">${formatNumberWithUnit(outputToken)}</span>
-                    </div>
+        const sidePanel = document.createElement('div');
+        sidePanel.id = 'ds-side-panel';
+        sidePanel.style.cssText = `
+            position: fixed; right: 20px; top: 80px; width: 320px; bottom: 20px;
+            background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(15px);
+            border: 1px solid rgba(0,0,0,0.08); border-radius: 16px;
+            box-shadow: -10px 0 30px rgba(0,0,0,0.05); z-index: 1000;
+            display: flex; flex-direction: column; overflow: hidden; font-family: sans-serif;
+        `;
+
+        sidePanel.innerHTML = `
+            <div style="padding: 20px; border-bottom: 1px solid rgba(0,0,0,0.05)">
+                <div style="font-weight: 600; font-size: 18px; color: #1a1a1a; margin-bottom: 12px;">用量趋势分析</div>
+                <div id="ds-range-selector" style="display: flex; gap: 8px;">
+                    <button data-r="today" style="${btnStyle}">今天</button>
+                    <button data-r="yesterday" style="${btnStyle}">昨天</button>
+                    <button data-r="week" style="${btnStyle} background:#3b82f6; color:white;">一周</button>
+                    <button data-r="month" style="${btnStyle}">本月</button>
                 </div>
+            </div>
+            <div id="ds-content-area" style="flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 24px;">
+                <div style="text-align: center; color: #999; margin-top: 50px;">等待接口数据加载...</div>
+            </div>
+        `;
+        document.body.appendChild(sidePanel);
+
+        // 事件委托
+        sidePanel.addEventListener('click', (e) => {
+            if (e.target.dataset.r) {
+                currentRange = e.target.dataset.r;
+                updateRangeButtons();
+                renderData();
+            }
+        });
+    }
+
+    const btnStyle = `padding: 4px 12px; border-radius: 6px; border: 1px solid #eee; background: white; cursor: pointer; font-size: 12px; transition: all 0.2s;`;
+
+    function updateRangeButtons() {
+        const btns = document.querySelectorAll('#ds-range-selector button');
+        btns.forEach(b => {
+            if (b.dataset.r === currentRange) {
+                b.style.background = '#3b82f6'; b.style.color = 'white';
+            } else {
+                b.style.background = 'white'; b.style.color = '#666';
+            }
+        });
+    }
+
+    function renderData() {
+        const stats = getStats(currentRange);
+        if (!stats) return;
+
+        const area = document.getElementById('ds-content-area');
+        area.innerHTML = '';
+
+        ['deepseek-v4-pro', 'deepseek-v4-flash'].forEach(m => {
+            const data = stats[m];
+            const card = document.createElement('div');
+            card.innerHTML = `
+                <div style="margin-bottom: 8px;">
+                    <div style="font-size: 14px; font-weight: 600; color: #444; display: flex; justify-content: space-between;">
+                        <span>${m.replace('deepseek-', '').toUpperCase()}</span>
+                        <span style="color: #10b981;">命中率 ${data.hitRate}</span>
+                    </div>
+                    <div style="font-size: 11px; color: #999; margin-bottom: 12px;">${data.displayDate}</div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                    ${itemUI("命中输入", data.hit, "#60a5fa")}
+                    ${itemUI("未命输入", data.miss, "#94a3b8")}
+                    ${itemUI("输出Token", data.out, "#3b82f6")}
+                    ${itemUI("合计", data.hit + data.miss + data.out, "#1e293b")}
+                </div>
+                <canvas id="chart-${m}" height="100"></canvas>
             `;
-            panel.appendChild(card);
-        });
+            area.appendChild(card);
 
-        // 寻找合适的注入点 (图表容器的上方)
-        const observer = setInterval(() => {
-            // 根据截图，寻找大致的图表容器父节点，这里以常用的 main 或页面包裹节点为例
-            // 实际使用时，如果注入位置不理想，可调整 querySelector 的目标
-            const container = document.querySelector('.main-content') || document.querySelector('main') || document.body;
-            if (container) {
-                // 插入到容器最前面
-                container.insertBefore(panel, container.firstChild);
-                clearInterval(observer);
-            }
-        }, 500);
-    }
-
-    // 拦截 Fetch API
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-        const response = await originalFetch.apply(this, args);
-        try {
-            const url = args[0] instanceof Request ? args[0].url : args[0];
-            if (url && url.includes('/api/v0/usage/amount')) {
-                // 克隆响应以免影响原页面的读取
-                const clone = response.clone();
-                clone.json().then(data => {
-                    renderStatsPanel(data);
-                }).catch(err => console.error("解析 JSON 失败", err));
-            }
-        } catch (e) {
-            console.error("拦截器异常", e);
-        }
-        return response;
-    };
-
-    // 拦截 XMLHttpRequest (兼容处理)
-    const originalXHR = window.XMLHttpRequest;
-    function newXHR() {
-        const xhr = new originalXHR();
-        xhr.addEventListener('load', function() {
-            if (xhr.responseURL && xhr.responseURL.includes('/api/v0/usage/amount')) {
-                try {
-                    const data = JSON.parse(xhr.responseText);
-                    renderStatsPanel(data);
-                } catch (e) {
-                    console.error("XHR JSON解析失败", e);
+            // 绘制曲线图
+            new Chart(document.getElementById(`chart-${m}`), {
+                type: 'line',
+                data: {
+                    labels: data.chartLabels,
+                    datasets: [{
+                        label: 'Total Tokens',
+                        data: data.chartData,
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false },
+                        y: { display: false }
+                    }
                 }
-            }
+            });
         });
-        return xhr;
     }
-    window.XMLHttpRequest = newXHR;
+
+    function itemUI(label, val, color) {
+        return `
+            <div style="background: rgba(0,0,0,0.03); padding: 8px; border-radius: 8px;">
+                <div style="font-size: 10px; color: #888;">${label}</div>
+                <div style="font-size: 13px; font-weight: 600; color: ${color};">${formatUnit(val)}</div>
+            </div>
+        `;
+    }
+
+    const originFetch = window.fetch;
+    window.fetch = async (...args) => {
+        const res = await originFetch(...args);
+        const url = args[0] instanceof Request ? args[0].url : args[0];
+        if (url.includes('/api/v0/usage/amount')) {
+            const clone = res.clone();
+            clone.json().then(data => {
+                rawUsageData = data;
+                initUI();
+                renderData();
+            });
+        }
+        return res;
+    };
 
 })();
