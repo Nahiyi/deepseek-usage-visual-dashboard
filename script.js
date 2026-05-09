@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         DeepSeek 极简用量看板 (双Y轴成本虚线版)
+// @name         DeepSeek 极简用量看板
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，悬浮精确显示每日命中率与金额。
+// @version      7.0
+// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，左侧展示双徽章（命中率与共计花费）。
 // @author       Nahiyi
 // @match        https://platform.deepseek.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=deepseek.com
@@ -17,14 +17,14 @@
     // 全局双数据源状态管理
     let capturedAmountData = null;
     let capturedCostData = null;
-    let currentSpan = 'thisWeek';
-    let chartInstances = {};
+    let currentSpan = 'thisWeek'; 
+    let chartInstances = {};   
 
     function formatUnit(numStr) {
         const n = Number(numStr);
         if (isNaN(n) || n === 0) return '0';
-
-        if (n < 10000) return n.toLocaleString();
+        
+        if (n < 10000) return n.toLocaleString(); 
         if (n < 100000) return (n / 10000).toFixed(2) + ' 万';
         if (n < 1000000) return (n / 100000).toFixed(2) + ' 十万';
         if (n < 10000000) return (n / 1000000).toFixed(2) + ' 百万';
@@ -34,7 +34,6 @@
 
     function formatCurrency(num) {
         if (isNaN(num) || num === 0) return '￥0.00';
-        // DeepSeek API 很便宜，为了精准度保留 4 位小数
         return '￥' + Number(num).toFixed(4);
     }
 
@@ -96,21 +95,20 @@
                 document.querySelectorAll('.nh-btn').forEach(btn => btn.classList.remove('active'));
                 e.target.classList.add('active');
                 currentSpan = e.target.getAttribute('data-span');
-                renderCards();
+                renderCards(); 
             }
         });
     }
 
     function renderCards() {
         const amountBiz = capturedAmountData?.data?.biz_data;
-        // 注意 cost 接口的 biz_data 是个数组
         const costBiz = capturedCostData?.data?.biz_data?.[0];
-
+        
         if (!amountBiz || !amountBiz.days || !costBiz || !costBiz.days) return;
 
         const container = document.getElementById('nahiyi-cards-container');
         if (!container) return;
-        container.innerHTML = '';
+        container.innerHTML = ''; 
 
         let amountDaysArray = amountBiz.days;
         let costDaysArray = costBiz.days;
@@ -120,24 +118,25 @@
             const localToday = getDS(new Date());
             filteredAmountDays = amountDaysArray.filter(d => d.date === localToday);
             if (filteredAmountDays.length === 0 && amountDaysArray.length > 0) {
-                 filteredAmountDays = [amountDaysArray[amountDaysArray.length - 1]];
+                 filteredAmountDays = [amountDaysArray[amountDaysArray.length - 1]]; 
             }
         } else if (currentSpan === 'thisWeek') {
             const now = new Date();
-            const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
+            const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay(); 
             const monday = new Date(now);
             monday.setDate(now.getDate() - dayOfWeek + 1);
             const sunday = new Date(monday);
             sunday.setDate(monday.getDate() + 6);
-
+            
             const monStr = getDS(monday);
             const sunStr = getDS(sunday);
-
+            
             filteredAmountDays = amountDaysArray.filter(d => d.date >= monStr && d.date <= sunStr);
         } else {
-            filteredAmountDays = amountDaysArray;
+            filteredAmountDays = amountDaysArray; 
         }
 
+        // 白名单：严格只渲染这两个官方活跃模型
         const modelsToRender = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
         modelsToRender.forEach(modelName => {
@@ -146,8 +145,8 @@
 
             filteredAmountDays.forEach(dayInfo => {
                 const dateStr = dayInfo.date;
-                labels.push(dateStr.slice(5)); // MM-DD
-
+                labels.push(dateStr.slice(5)); 
+                
                 const modelDayUsage = dayInfo.data.find(m => m.model === modelName);
                 let dHit = 0, dMiss = 0, dOut = 0;
                 if (modelDayUsage) {
@@ -155,7 +154,7 @@
                     dMiss = Number(modelDayUsage.usage.find(u => u.type === 'PROMPT_CACHE_MISS_TOKEN')?.amount || 0);
                     dOut = Number(modelDayUsage.usage.find(u => u.type === 'RESPONSE_TOKEN')?.amount || 0);
                 }
-
+                
                 hitTotal += dHit; missTotal += dMiss; outTotal += dOut;
                 hitData.push(dHit); missData.push(dMiss); outData.push(dOut);
 
@@ -165,7 +164,7 @@
                     const modelCostUsage = costDayInfo.data.find(m => m.model === modelName);
                     if (modelCostUsage) {
                         modelCostUsage.usage.forEach(u => {
-                            dCost += Number(u.amount || 0); // 累加该模型当天的所有类型成本
+                            dCost += Number(u.amount || 0); 
                         });
                     }
                 }
@@ -182,9 +181,15 @@
 
             card.innerHTML = `
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div>
-                        <h3 style="margin: 0 0 6px 0; font-size: 18px; color: #111;">${modelName}</h3>
-                        <span style="font-size: 14px; color: #10b981; font-weight: 600; background: rgba(16,185,129,0.1); padding: 4px 8px; border-radius: 6px;">综合命中率: ${hitRate}</span>
+                    <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 6px;">
+                        <h3 style="margin: 0 0 4px 0; font-size: 18px; color: #111;">${modelName}</h3>
+                        <span style="font-size: 13px; color: #10b981; font-weight: 600; background: rgba(16,185,129,0.1); padding: 4px 8px; border-radius: 6px;">
+                            综合命中率: ${hitRate}
+                        </span>
+                        <!-- 新增成本徽章，统一左侧视觉对齐 -->
+                        <span style="font-size: 13px; color: #ef4444; font-weight: 600; background: rgba(239,68,68,0.1); padding: 4px 8px; border-radius: 6px;">
+                            共计花费: ${formatCurrency(costTotal)}
+                        </span>
                     </div>
                     <div style="font-size: 14px; color: #555; text-align: right; line-height: 1.8;">
                         <div>输入命中: <span style="font-weight:600; color:#3b82f6; margin-left: 8px;">${formatUnit(hitTotal)}</span></div>
@@ -196,10 +201,10 @@
                 <div style="position: relative; height: 240px; width: 100%;"><canvas id="${canvasId}"></canvas></div>
             `;
             container.appendChild(card);
-
+            
             setTimeout(() => {
                 const ctx = document.getElementById(canvasId).getContext('2d');
-                if (chartInstances[canvasId]) chartInstances[canvasId].destroy();
+                if (chartInstances[canvasId]) chartInstances[canvasId].destroy(); 
 
                 chartInstances[canvasId] = new Chart(ctx, {
                     type: 'line',
@@ -209,7 +214,6 @@
                             { label: '输入命中', data: hitData, yAxisID: 'y', borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', tension: 0.3, fill: true, borderWidth: 2, pointRadius: 3, pointHoverRadius: 6 },
                             { label: '输入未命中', data: missData, yAxisID: 'y', borderColor: '#94a3b8', tension: 0.3, fill: false, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4 },
                             { label: '输出', data: outData, yAxisID: 'y', borderColor: '#f59e0b', tension: 0.3, fill: false, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4 },
-                            // 成本虚线，分配给独立的右侧 y1 轴
                             { label: '成本金额', data: costGraphData, yAxisID: 'y1', borderColor: '#ef4444', borderDash: [5, 5], tension: 0.3, fill: false, borderWidth: 2, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#ef4444' }
                         ]
                     },
@@ -224,7 +228,6 @@
                                     label: function(context) {
                                         let label = context.dataset.label || '';
                                         if (label) label += ': ';
-                                        // 区分格式化：如果是成本线，使用金钱格式；否则用阶梯中文单位
                                         if (context.dataset.label === '成本金额') {
                                             label += formatCurrency(context.parsed.y);
                                         } else {
@@ -247,14 +250,14 @@
                         },
                         scales: {
                             x: { grid: { display: false }, ticks: { font: { size: 11 }, maxTicksLimit: 14 } },
-                            y: {
+                            y: { 
                                 type: 'linear', display: true, position: 'left',
-                                grid: { color: 'rgba(0,0,0,0.04)' },
-                                ticks: { font: { size: 11 }, callback: function(value) { return formatUnit(value); } }
+                                grid: { color: 'rgba(0,0,0,0.04)' }, 
+                                ticks: { font: { size: 11 }, callback: function(value) { return formatUnit(value); } } 
                             },
-                            y1: {
+                            y1: { 
                                 type: 'linear', display: true, position: 'right',
-                                grid: { drawOnChartArea: false }, // 禁止网格线覆盖原图表
+                                grid: { drawOnChartArea: false }, 
                                 ticks: { font: { size: 11 }, color: '#ef4444', callback: function(value) { return '￥' + value.toFixed(2); } }
                             }
                         }
@@ -274,8 +277,7 @@
                     capturedAmountData = data;
                     checkAndRender();
                 }).catch(e => {});
-            }
-            else if (url && url.includes('/api/v0/usage/cost')) {
+            } else if (url && url.includes('/api/v0/usage/cost')) {
                 response.clone().json().then(data => {
                     capturedCostData = data;
                     checkAndRender();
