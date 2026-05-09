@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         DeepSeek 极简用量看板
+// @name         DeepSeek 增强用量看板
 // @namespace    http://tampermonkey.net/
-// @version      8.0
-// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，左侧展示双徽章（命中率与共计花费），UI细节极致打磨。
+// @version      9.0
+// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，左侧展示双徽章（命中率与共计花费），UI细节极致打磨，采用动态 CSS 变量与 JS 监听，精准跟随网页实际深浅模式切换。
 // @author       Nahiyi
 // @match        https://platform.deepseek.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=deepseek.com
@@ -14,11 +14,105 @@
 (function() {
     'use strict';
 
-    // 全局双数据源状态管理
     let capturedAmountData = null;
     let capturedCostData = null;
     let currentSpan = 'thisWeek'; 
     let chartInstances = {};   
+    let isDarkMode = false;
+
+    function injectThemeStyles() {
+        if (document.getElementById('nahiyi-ds-theme-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'nahiyi-ds-theme-styles';
+        
+        // 给看板自身赋予 .nahiyi-theme-dark 类来控制样式，避免依赖外部不可靠的继承
+        style.innerHTML = `
+            #nahiyi-ds-top-dashboard {
+                --nh-bg-dash: rgba(255, 255, 255, 0.6);
+                --nh-border-dash: rgba(200, 200, 200, 0.4);
+                --nh-text-title: #333;
+                --nh-text-main: #111;
+                --nh-text-sub: #555;
+                --nh-text-muted: #666;
+                --nh-bg-controls: rgba(0,0,0,0.03);
+                --nh-bg-card: rgba(255, 255, 255, 0.9);
+                --nh-border-card: #f0f0f0;
+                --nh-bg-btn-active: #fff;
+                --nh-shadow-card: rgba(0, 0, 0, 0.02);
+                --nh-chart-grid: rgba(0, 0, 0, 0.04);
+            }
+            #nahiyi-ds-top-dashboard.nahiyi-theme-dark {
+                --nh-bg-dash: rgba(30, 32, 35, 0.6);
+                --nh-border-dash: rgba(255, 255, 255, 0.1);
+                --nh-text-title: #f3f4f6;
+                --nh-text-main: #e5e7eb;
+                --nh-text-sub: #9ca3af;
+                --nh-text-muted: #9ca3af;
+                --nh-bg-controls: rgba(0,0,0,0.3);
+                --nh-bg-card: rgba(40, 42, 45, 0.9);
+                --nh-border-card: #374151;
+                --nh-bg-btn-active: #1f2937;
+                --nh-shadow-card: rgba(0, 0, 0, 0.2);
+                --nh-chart-grid: rgba(255, 255, 255, 0.05);
+            }
+            .nh-btn { border: none; background: transparent; padding: 6px 16px; border-radius: 6px; font-size: 13px; color: var(--nh-text-muted); cursor: pointer; transition: all 0.2s; }
+            .nh-btn:hover { color: #3b82f6; }
+            .nh-btn.active { background: var(--nh-bg-btn-active); color: #3b82f6; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function observeHostTheme() {
+        const htmlNode = document.documentElement;
+        
+        // 核心侦测逻辑：看 html 或 body 身上有没有包含 dark 字眼的 class 或 data 属性
+        const checkTheme = () => {
+            const htmlClass = htmlNode.className || '';
+            const htmlTheme = htmlNode.getAttribute('data-theme') || htmlNode.getAttribute('theme') || '';
+            const bodyClass = document.body ? document.body.className : '';
+            
+            const currentlyDark = htmlClass.includes('dark') || htmlTheme.includes('dark') || bodyClass.includes('dark');
+            
+            if (isDarkMode !== currentlyDark) {
+                isDarkMode = currentlyDark;
+                const dashboard = document.getElementById('nahiyi-ds-top-dashboard');
+                if (dashboard) {
+                    if (isDarkMode) {
+                        dashboard.classList.add('nahiyi-theme-dark');
+                    } else {
+                        dashboard.classList.remove('nahiyi-theme-dark');
+                    }
+                    // 主题切换时，通知 Chart.js 更新网格线颜色
+                    updateChartsTheme();
+                }
+            }
+        };
+
+        checkTheme();
+
+        // 建立监听器，网页切换主题时实时跟随
+        const observer = new MutationObserver(checkTheme);
+        observer.observe(htmlNode, { attributes: true, attributeFilter: ['class', 'data-theme', 'theme'] });
+        if (document.body) {
+            observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+        }
+    }
+
+    // 当主题切换时，动态更新已有图表的网格线和刻度颜色
+    function updateChartsTheme() {
+        const gridColor = isDarkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
+        const tickColor = isDarkMode ? '#9ca3af' : '#888';
+        
+        Object.values(chartInstances).forEach(chart => {
+            if (chart.options.scales.x) chart.options.scales.x.ticks.color = tickColor;
+            if (chart.options.scales.y) {
+                chart.options.scales.y.grid.color = gridColor;
+                chart.options.scales.y.ticks.color = tickColor;
+            }
+            if (chart.options.plugins.legend) chart.options.plugins.legend.labels.color = tickColor;
+            chart.update();
+        });
+    }
 
     function formatUnit(numStr) {
         const n = Number(numStr);
@@ -46,8 +140,10 @@
 
     function checkAndRender() {
         if (capturedAmountData && capturedCostData) {
+            injectThemeStyles();
             initDashboardLayout();
             renderCards();
+            observeHostTheme(); // 启动主题嗅探器
         }
     }
 
@@ -62,29 +158,28 @@
 
         const dashboard = document.createElement('div');
         dashboard.id = 'nahiyi-ds-top-dashboard';
+        
+        if (isDarkMode) dashboard.classList.add('nahiyi-theme-dark');
+
         dashboard.style.cssText = `
             margin: 20px 0; padding: 20px 24px;
-            background: rgba(255, 255, 255, 0.6); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(200, 200, 200, 0.4); border-radius: 12px;
+            background: var(--nh-bg-dash); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--nh-border-dash); border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
             display: flex; flex-direction: column; gap: 16px; z-index: 100;
+            transition: background 0.3s, border-color 0.3s;
         `;
 
         dashboard.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(0,0,0,0.05); padding-bottom: 12px;">
-                <div style="font-size: 16px; font-weight: 600; color: #333;">Token 用量与成本深度看板</div>
-                <div id="nahiyi-span-controls" style="display: flex; gap: 8px; background: rgba(0,0,0,0.03); padding: 4px; border-radius: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--nh-border-dash); padding-bottom: 12px; transition: border-color 0.3s;">
+                <div style="font-size: 16px; font-weight: 600; color: var(--nh-text-title); transition: color 0.3s;">Token 用量与成本深度看板</div>
+                <div id="nahiyi-span-controls" style="display: flex; gap: 8px; background: var(--nh-bg-controls); padding: 4px; border-radius: 8px; transition: background 0.3s;">
                     <button data-span="today" class="nh-btn">当天</button>
                     <button data-span="thisWeek" class="nh-btn active">本周</button>
                     <button data-span="1month" class="nh-btn">本月</button>
                 </div>
             </div>
             <div id="nahiyi-cards-container" style="display: flex; flex-direction: column; gap: 24px;"></div>
-            <style>
-                .nh-btn { border: none; background: transparent; padding: 6px 16px; border-radius: 6px; font-size: 13px; color: #666; cursor: pointer; transition: all 0.2s; }
-                .nh-btn:hover { color: #3b82f6; }
-                .nh-btn.active { background: #fff; color: #3b82f6; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-            </style>
         `;
 
         containerInfo.insertBefore(dashboard, containerInfo.firstChild);
@@ -135,7 +230,6 @@
             filteredAmountDays = amountDaysArray; 
         }
 
-        // 白名单：严格只渲染这两个官方活跃模型
         const modelsToRender = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
         modelsToRender.forEach(modelName => {
@@ -175,13 +269,13 @@
             const hitRate = totalInput > 0 ? ((hitTotal / totalInput) * 100).toFixed(2) + '%' : '0.00%';
 
             const card = document.createElement('div');
-            card.style.cssText = `width: 100%; box-sizing: border-box; background: rgba(255, 255, 255, 0.9); border-radius: 12px; padding: 24px; border: 1px solid #f0f0f0; display: flex; flex-direction: column; gap: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.02);`;
+            card.style.cssText = `width: 100%; box-sizing: border-box; background: var(--nh-bg-card); border-radius: 12px; padding: 24px; border: 1px solid var(--nh-border-card); display: flex; flex-direction: column; gap: 20px; box-shadow: 0 2px 12px var(--nh-shadow-card); transition: all 0.3s;`;
             const canvasId = `nahiyi-chart-${modelName}`;
 
             card.innerHTML = `
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                     <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 6px;">
-                        <h3 style="margin: 0 0 4px 0; font-size: 18px; color: #111;">${modelName}</h3>
+                        <h3 style="margin: 0 0 4px 0; font-size: 18px; color: var(--nh-text-main); transition: color 0.3s;">${modelName}</h3>
                         <span style="font-size: 12px; color: #10b981; font-weight: 600; background: rgba(16,185,129,0.1); padding: 3px 6px; border-radius: 4px;">
                             综合命中率: ${hitRate}
                         </span>
@@ -189,7 +283,7 @@
                             共计花费: ${formatCurrency(costTotal)}
                         </span>
                     </div>
-                    <div style="font-size: 14px; color: #555; text-align: right; line-height: 1.8;">
+                    <div style="font-size: 14px; color: var(--nh-text-sub); text-align: right; line-height: 1.8; transition: color 0.3s;">
                         <div>输入命中: <span style="font-weight:600; color:#3b82f6; margin-left: 8px;">${formatUnit(hitTotal)}</span></div>
                         <div>输入未命中: <span style="font-weight:600; color:#94a3b8; margin-left: 8px;">${formatUnit(missTotal)}</span></div>
                         <div>输出: <span style="font-weight:600; color:#f59e0b; margin-left: 8px;">${formatUnit(outTotal)}</span></div>
@@ -203,6 +297,9 @@
             setTimeout(() => {
                 const ctx = document.getElementById(canvasId).getContext('2d');
                 if (chartInstances[canvasId]) chartInstances[canvasId].destroy(); 
+
+                const gridColor = isDarkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
+                const tickColor = isDarkMode ? '#9ca3af' : '#888';
 
                 chartInstances[canvasId] = new Chart(ctx, {
                     type: 'line',
@@ -219,7 +316,7 @@
                         responsive: true, maintainAspectRatio: false,
                         interaction: { mode: 'index', intersect: false },
                         plugins: {
-                            legend: { position: 'bottom', labels: { boxWidth: 16, font: { size: 12 }, padding: 20 } },
+                            legend: { position: 'bottom', labels: { boxWidth: 16, font: { size: 12 }, padding: 20, color: tickColor } },
                             tooltip: {
                                 padding: 12, bodySpacing: 6, titleFont: { size: 14 }, bodyFont: { size: 13 },
                                 callbacks: {
@@ -247,11 +344,11 @@
                             }
                         },
                         scales: {
-                            x: { grid: { display: false }, ticks: { font: { size: 11 }, maxTicksLimit: 14 } },
+                            x: { grid: { display: false }, ticks: { font: { size: 11 }, maxTicksLimit: 14, color: tickColor } },
                             y: { 
                                 type: 'linear', display: true, position: 'left',
-                                grid: { color: 'rgba(0,0,0,0.04)' }, 
-                                ticks: { font: { size: 11 }, callback: function(value) { return formatUnit(value); } } 
+                                grid: { color: gridColor }, 
+                                ticks: { font: { size: 11 }, color: tickColor, callback: function(value) { return formatUnit(value); } } 
                             },
                             y1: { 
                                 type: 'linear', display: true, position: 'right',
