@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         DeepSeek 极简用量看板
+// @name         DeepSeek 极简用量看板 (双Y轴成本虚线版)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
-// @description  全宽单行卡片，Flash优先，严谨的周一至周日统计，严格阶梯中文单位（十万/百万/千万/亿），保留极简毛玻璃美学。
+// @version      6.0
+// @description  全宽本周架构，双接口联合劫持，引入右侧独立 Y 轴绘制成本虚线，悬浮精确显示每日命中率与金额。
 // @author       Nahiyi
 // @match        https://platform.deepseek.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=deepseek.com
@@ -14,16 +14,17 @@
 (function() {
     'use strict';
 
-    // 全局状态管理
-    let capturedData = null;
-    let currentSpan = 'thisWeek'; // 默认本周 (周一至周日)
-    let chartInstances = {};   
+    // 全局双数据源状态管理
+    let capturedAmountData = null;
+    let capturedCostData = null;
+    let currentSpan = 'thisWeek';
+    let chartInstances = {};
 
     function formatUnit(numStr) {
         const n = Number(numStr);
         if (isNaN(n) || n === 0) return '0';
-        
-        if (n < 10000) return n.toLocaleString(); 
+
+        if (n < 10000) return n.toLocaleString();
         if (n < 100000) return (n / 10000).toFixed(2) + ' 万';
         if (n < 1000000) return (n / 100000).toFixed(2) + ' 十万';
         if (n < 10000000) return (n / 1000000).toFixed(2) + ' 百万';
@@ -31,11 +32,25 @@
         return (n / 100000000).toFixed(2) + ' 亿';
     }
 
+    function formatCurrency(num) {
+        if (isNaN(num) || num === 0) return '￥0.00';
+        // DeepSeek API 很便宜，为了精准度保留 4 位小数
+        return '￥' + Number(num).toFixed(4);
+    }
+
     function getDS(d) {
         const yyyy = d.getFullYear();
         const mm = String(d.getMonth() + 1).padStart(2, '0');
         const dd = String(d.getDate()).padStart(2, '0');
         return `${yyyy}-${mm}-${dd}`;
+    }
+
+    function checkAndRender() {
+        // 只有当用量和成本两个接口都拦截到数据时，才进行渲染
+        if (capturedAmountData && capturedCostData) {
+            initDashboardLayout();
+            renderCards();
+        }
     }
 
     function initDashboardLayout() {
@@ -59,20 +74,16 @@
 
         dashboard.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(0,0,0,0.05); padding-bottom: 12px;">
-                <div style="font-size: 16px; font-weight: 600; color: #333;">Token 用量深度看板</div>
+                <div style="font-size: 16px; font-weight: 600; color: #333;">Token 用量与成本深度看板</div>
                 <div id="nahiyi-span-controls" style="display: flex; gap: 8px; background: rgba(0,0,0,0.03); padding: 4px; border-radius: 8px;">
                     <button data-span="today" class="nh-btn">当天</button>
                     <button data-span="thisWeek" class="nh-btn active">本周</button>
                     <button data-span="1month" class="nh-btn">本月</button>
                 </div>
             </div>
-            <!-- 卡片容器改为纵向排列 -->
             <div id="nahiyi-cards-container" style="display: flex; flex-direction: column; gap: 24px;"></div>
             <style>
-                .nh-btn {
-                    border: none; background: transparent; padding: 6px 16px; border-radius: 6px;
-                    font-size: 13px; color: #666; cursor: pointer; transition: all 0.2s;
-                }
+                .nh-btn { border: none; background: transparent; padding: 6px 16px; border-radius: 6px; font-size: 13px; color: #666; cursor: pointer; transition: all 0.2s; }
                 .nh-btn:hover { color: #3b82f6; }
                 .nh-btn.active { background: #fff; color: #3b82f6; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
             </style>
@@ -85,76 +96,88 @@
                 document.querySelectorAll('.nh-btn').forEach(btn => btn.classList.remove('active'));
                 e.target.classList.add('active');
                 currentSpan = e.target.getAttribute('data-span');
-                renderCards(); 
+                renderCards();
             }
         });
     }
 
     function renderCards() {
-        const bizData = capturedData?.data?.biz_data;
-        if (!bizData || !bizData.days) return;
+        const amountBiz = capturedAmountData?.data?.biz_data;
+        // 注意 cost 接口的 biz_data 是个数组
+        const costBiz = capturedCostData?.data?.biz_data?.[0];
+
+        if (!amountBiz || !amountBiz.days || !costBiz || !costBiz.days) return;
 
         const container = document.getElementById('nahiyi-cards-container');
         if (!container) return;
-        container.innerHTML = ''; 
+        container.innerHTML = '';
 
-        let daysArray = bizData.days;
-        let filteredDays = [];
+        let amountDaysArray = amountBiz.days;
+        let costDaysArray = costBiz.days;
+        let filteredAmountDays = [];
 
-        // 核心跨度算法
         if (currentSpan === 'today') {
             const localToday = getDS(new Date());
-            filteredDays = daysArray.filter(d => d.date === localToday);
-            if (filteredDays.length === 0 && daysArray.length > 0) {
-                 filteredDays = [daysArray[daysArray.length - 1]]; // 兜底最新的一天
+            filteredAmountDays = amountDaysArray.filter(d => d.date === localToday);
+            if (filteredAmountDays.length === 0 && amountDaysArray.length > 0) {
+                 filteredAmountDays = [amountDaysArray[amountDaysArray.length - 1]];
             }
         } else if (currentSpan === 'thisWeek') {
             const now = new Date();
-            const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay(); 
-            
+            const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
             const monday = new Date(now);
             monday.setDate(now.getDate() - dayOfWeek + 1);
             const sunday = new Date(monday);
             sunday.setDate(monday.getDate() + 6);
-            
+
             const monStr = getDS(monday);
             const sunStr = getDS(sunday);
-            
-            filteredDays = daysArray.filter(d => d.date >= monStr && d.date <= sunStr);
+
+            filteredAmountDays = amountDaysArray.filter(d => d.date >= monStr && d.date <= sunStr);
         } else {
-            filteredDays = daysArray;
+            filteredAmountDays = amountDaysArray;
         }
 
         const modelsToRender = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
         modelsToRender.forEach(modelName => {
-            let hitTotal = 0, missTotal = 0, outTotal = 0;
-            const labels = [], hitData = [], missData = [], outData = [];
+            let hitTotal = 0, missTotal = 0, outTotal = 0, costTotal = 0;
+            const labels = [], hitData = [], missData = [], outData = [], costGraphData = [];
 
-            filteredDays.forEach(dayInfo => {
-                labels.push(dayInfo.date.slice(5)); // 取 MM-DD
+            filteredAmountDays.forEach(dayInfo => {
+                const dateStr = dayInfo.date;
+                labels.push(dateStr.slice(5)); // MM-DD
+
                 const modelDayUsage = dayInfo.data.find(m => m.model === modelName);
-                
                 let dHit = 0, dMiss = 0, dOut = 0;
                 if (modelDayUsage) {
                     dHit = Number(modelDayUsage.usage.find(u => u.type === 'PROMPT_CACHE_HIT_TOKEN')?.amount || 0);
                     dMiss = Number(modelDayUsage.usage.find(u => u.type === 'PROMPT_CACHE_MISS_TOKEN')?.amount || 0);
                     dOut = Number(modelDayUsage.usage.find(u => u.type === 'RESPONSE_TOKEN')?.amount || 0);
                 }
-                
+
                 hitTotal += dHit; missTotal += dMiss; outTotal += dOut;
                 hitData.push(dHit); missData.push(dMiss); outData.push(dOut);
+
+                let dCost = 0;
+                const costDayInfo = costDaysArray.find(d => d.date === dateStr);
+                if (costDayInfo) {
+                    const modelCostUsage = costDayInfo.data.find(m => m.model === modelName);
+                    if (modelCostUsage) {
+                        modelCostUsage.usage.forEach(u => {
+                            dCost += Number(u.amount || 0); // 累加该模型当天的所有类型成本
+                        });
+                    }
+                }
+                costTotal += dCost;
+                costGraphData.push(dCost);
             });
 
             const totalInput = hitTotal + missTotal;
             const hitRate = totalInput > 0 ? ((hitTotal / totalInput) * 100).toFixed(2) + '%' : '0.00%';
 
             const card = document.createElement('div');
-            card.style.cssText = `
-                width: 100%; box-sizing: border-box; background: rgba(255, 255, 255, 0.9); 
-                border-radius: 12px; padding: 24px; border: 1px solid #f0f0f0; 
-                display: flex; flex-direction: column; gap: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.02);
-            `;
+            card.style.cssText = `width: 100%; box-sizing: border-box; background: rgba(255, 255, 255, 0.9); border-radius: 12px; padding: 24px; border: 1px solid #f0f0f0; display: flex; flex-direction: column; gap: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.02);`;
             const canvasId = `nahiyi-chart-${modelName}`;
 
             card.innerHTML = `
@@ -167,6 +190,7 @@
                         <div>输入命中: <span style="font-weight:600; color:#3b82f6; margin-left: 8px;">${formatUnit(hitTotal)}</span></div>
                         <div>输入未命: <span style="font-weight:600; color:#94a3b8; margin-left: 8px;">${formatUnit(missTotal)}</span></div>
                         <div>输出: <span style="font-weight:600; color:#f59e0b; margin-left: 8px;">${formatUnit(outTotal)}</span></div>
+                        <div>成本: <span style="font-weight:600; color:#ef4444; margin-left: 8px;">${formatCurrency(costTotal)}</span></div>
                     </div>
                 </div>
                 <div style="position: relative; height: 240px; width: 100%;"><canvas id="${canvasId}"></canvas></div>
@@ -175,33 +199,37 @@
 
             setTimeout(() => {
                 const ctx = document.getElementById(canvasId).getContext('2d');
-                if (chartInstances[canvasId]) chartInstances[canvasId].destroy(); 
+                if (chartInstances[canvasId]) chartInstances[canvasId].destroy();
 
                 chartInstances[canvasId] = new Chart(ctx, {
                     type: 'line',
                     data: {
                         labels: labels,
                         datasets: [
-                            { label: '输入命中', data: hitData, borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', tension: 0.3, fill: true, borderWidth: 2, pointRadius: 3, pointHoverRadius: 6 },
-                            { label: '输入未命中', data: missData, borderColor: '#94a3b8', tension: 0.3, fill: false, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4 },
-                            { label: '输出', data: outData, borderColor: '#f59e0b', tension: 0.3, fill: false, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4 }
+                            { label: '输入命中', data: hitData, yAxisID: 'y', borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', tension: 0.3, fill: true, borderWidth: 2, pointRadius: 3, pointHoverRadius: 6 },
+                            { label: '输入未命中', data: missData, yAxisID: 'y', borderColor: '#94a3b8', tension: 0.3, fill: false, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4 },
+                            { label: '输出', data: outData, yAxisID: 'y', borderColor: '#f59e0b', tension: 0.3, fill: false, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4 },
+                            // 成本虚线，分配给独立的右侧 y1 轴
+                            { label: '成本金额', data: costGraphData, yAxisID: 'y1', borderColor: '#ef4444', borderDash: [5, 5], tension: 0.3, fill: false, borderWidth: 2, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#ef4444' }
                         ]
                     },
                     options: {
                         responsive: true, maintainAspectRatio: false,
                         interaction: { mode: 'index', intersect: false },
                         plugins: {
-                            legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 12 }, padding: 20 } },
+                            legend: { position: 'bottom', labels: { boxWidth: 16, font: { size: 12 }, padding: 20 } },
                             tooltip: {
-                                padding: 12,
-                                bodySpacing: 6,
-                                titleFont: { size: 14 },
-                                bodyFont: { size: 13 },
+                                padding: 12, bodySpacing: 6, titleFont: { size: 14 }, bodyFont: { size: 13 },
                                 callbacks: {
                                     label: function(context) {
                                         let label = context.dataset.label || '';
                                         if (label) label += ': ';
-                                        if (context.parsed.y !== null) label += formatUnit(context.parsed.y);
+                                        // 区分格式化：如果是成本线，使用金钱格式；否则用阶梯中文单位
+                                        if (context.dataset.label === '成本金额') {
+                                            label += formatCurrency(context.parsed.y);
+                                        } else {
+                                            if (context.parsed.y !== null) label += formatUnit(context.parsed.y);
+                                        }
                                         return label;
                                     },
                                     afterBody: function(tooltipItems) {
@@ -219,7 +247,16 @@
                         },
                         scales: {
                             x: { grid: { display: false }, ticks: { font: { size: 11 }, maxTicksLimit: 14 } },
-                            y: { grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { font: { size: 11 }, callback: function(value) { return formatUnit(value); } } }
+                            y: {
+                                type: 'linear', display: true, position: 'left',
+                                grid: { color: 'rgba(0,0,0,0.04)' },
+                                ticks: { font: { size: 11 }, callback: function(value) { return formatUnit(value); } }
+                            },
+                            y1: {
+                                type: 'linear', display: true, position: 'right',
+                                grid: { drawOnChartArea: false }, // 禁止网格线覆盖原图表
+                                ticks: { font: { size: 11 }, color: '#ef4444', callback: function(value) { return '￥' + value.toFixed(2); } }
+                            }
                         }
                     }
                 });
@@ -233,12 +270,16 @@
         try {
             const url = args[0] instanceof Request ? args[0].url : args[0];
             if (url && url.includes('/api/v0/usage/amount')) {
-                const clone = response.clone();
-                clone.json().then(data => {
-                    capturedData = data;
-                    initDashboardLayout();
-                    renderCards();
-                }).catch(err => console.error("解析 JSON 失败", err));
+                response.clone().json().then(data => {
+                    capturedAmountData = data;
+                    checkAndRender();
+                }).catch(e => {});
+            }
+            else if (url && url.includes('/api/v0/usage/cost')) {
+                response.clone().json().then(data => {
+                    capturedCostData = data;
+                    checkAndRender();
+                }).catch(e => {});
             }
         } catch (e) {}
         return response;
@@ -248,12 +289,12 @@
     function newXHR() {
         const xhr = new originalXHR();
         xhr.addEventListener('load', function() {
-            if (xhr.responseURL && xhr.responseURL.includes('/api/v0/usage/amount')) {
-                try {
-                    capturedData = JSON.parse(xhr.responseText);
-                    initDashboardLayout();
-                    renderCards();
-                } catch (e) {}
+            if (xhr.responseURL) {
+                if (xhr.responseURL.includes('/api/v0/usage/amount')) {
+                    try { capturedAmountData = JSON.parse(xhr.responseText); checkAndRender(); } catch (e) {}
+                } else if (xhr.responseURL.includes('/api/v0/usage/cost')) {
+                    try { capturedCostData = JSON.parse(xhr.responseText); checkAndRender(); } catch (e) {}
+                }
             }
         });
         return xhr;
