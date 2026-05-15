@@ -22,10 +22,18 @@
     let isDarkMode = false;
     let themeCheckInterval = null;
     const TOKEN_PRICE_UNIT = 1000000;
+    const DEFAULT_PERSONAL_PRICE_OUTPUT_RATIO = 0.2;
     // Hardcoded to the current official DeepSeek pricing page on 2026-05-15.
     const PERSONAL_PRICE_MODELS = {
-        'v4-flash': { hitPrice: 0.02, missPrice: 1, outputPrice: 2 },
-        'v4-pro': { hitPrice: 0.025, missPrice: 3, outputPrice: 6 }
+        'v4-flash': { usageModel: 'deepseek-v4-flash', hitPrice: 0.02, missPrice: 1, outputPrice: 2 },
+        'v4-pro': { usageModel: 'deepseek-v4-pro', hitPrice: 0.025, missPrice: 3, outputPrice: 6 }
+    };
+    const PERSONAL_PRICE_RATIO_SOURCE_LABELS = {
+        current_model: '当前时间范围模型专属比例',
+        historical_model: '全量历史模型专属比例',
+        current_overall: '当前时间范围整体比例',
+        historical_overall: '全量历史整体比例',
+        default: '默认比例'
     };
 
     function injectThemeStyles() {
@@ -161,6 +169,10 @@
         return digits ? Number(digits) : 0;
     }
 
+    function getDefaultPredictTotalInputValue() {
+        return formatTokenInputDisplayValue('2000000');
+    }
+
     function bindPredictTotalInputFormatting(input) {
         if (!input) return;
         input.value = formatTokenInputDisplayValue(input.value);
@@ -240,20 +252,130 @@
             sumMiss,
             sumInput,
             sumOutput,
-            outputRatio: sumInput > 0 ? roundPredictionValue(sumOutput / sumInput) : 0.2
+            outputRatio: sumInput > 0 ? roundPredictionValue(sumOutput / sumInput) : DEFAULT_PERSONAL_PRICE_OUTPUT_RATIO
         };
     }
 
-    function calculatePersonalPriceRows({ totalInput, hitRates, outputRatio }) {
-        const predictedOutput = totalInput * outputRatio;
+    function buildPersonalPriceModelStats(amountDays) {
+        const statsByModel = {};
+        Object.keys(PERSONAL_PRICE_MODELS).forEach(modelKey => {
+            statsByModel[modelKey] = {
+                sumHit: 0,
+                sumMiss: 0,
+                sumInput: 0,
+                sumOutput: 0,
+                dayCount: 0,
+                dateRangeStart: null,
+                dateRangeEnd: null,
+                outputRatio: DEFAULT_PERSONAL_PRICE_OUTPUT_RATIO
+            };
+        });
+
+        amountDays.forEach(day => {
+            Object.entries(PERSONAL_PRICE_MODELS).forEach(([modelKey, modelConfig]) => {
+                const modelUsage = day.data.find(item => item.model === modelConfig.usageModel);
+                if (!modelUsage) return;
+
+                const hit = Number(modelUsage.usage.find(u => u.type === 'PROMPT_CACHE_HIT_TOKEN')?.amount || 0);
+                const miss = Number(modelUsage.usage.find(u => u.type === 'PROMPT_CACHE_MISS_TOKEN')?.amount || 0);
+                const output = Number(modelUsage.usage.find(u => u.type === 'RESPONSE_TOKEN')?.amount || 0);
+                const input = hit + miss;
+                if (input <= 0 && output <= 0) return;
+
+                const modelStats = statsByModel[modelKey];
+                modelStats.sumHit += hit;
+                modelStats.sumMiss += miss;
+                modelStats.sumInput += input;
+                modelStats.sumOutput += output;
+                modelStats.dayCount += 1;
+                if (!modelStats.dateRangeStart) modelStats.dateRangeStart = day.date;
+                modelStats.dateRangeEnd = day.date;
+            });
+        });
+
+        Object.values(statsByModel).forEach(modelStats => {
+            modelStats.outputRatio = modelStats.sumInput > 0
+                ? roundPredictionValue(modelStats.sumOutput / modelStats.sumInput)
+                : DEFAULT_PERSONAL_PRICE_OUTPUT_RATIO;
+        });
+
+        return statsByModel;
+    }
+
+    function buildPersonalPriceScopeStats(amountDays) {
+        return {
+            overallStats: buildPersonalPriceStats(amountDays),
+            modelStats: buildPersonalPriceModelStats(amountDays)
+        };
+    }
+
+    function resolvePersonalPriceModelRatios({ currentSpanModelStats, currentSpanOverallStats, historicalModelStats, historicalOverallStats, defaultRatio = DEFAULT_PERSONAL_PRICE_OUTPUT_RATIO }) {
+        const resolved = {};
+
+        Object.keys(PERSONAL_PRICE_MODELS).forEach(modelKey => {
+            const currentModel = currentSpanModelStats?.[modelKey];
+            const historicalModel = historicalModelStats?.[modelKey];
+
+            if (currentModel?.sumInput > 0) {
+                resolved[modelKey] = {
+                    outputRatio: currentModel.outputRatio,
+                    ratioSource: 'current_model',
+                    stats: currentModel
+                };
+                return;
+            }
+
+            if (historicalModel?.sumInput > 0) {
+                resolved[modelKey] = {
+                    outputRatio: historicalModel.outputRatio,
+                    ratioSource: 'historical_model',
+                    stats: historicalModel
+                };
+                return;
+            }
+
+            if (currentSpanOverallStats?.sumInput > 0) {
+                resolved[modelKey] = {
+                    outputRatio: currentSpanOverallStats.outputRatio,
+                    ratioSource: 'current_overall',
+                    stats: currentSpanOverallStats
+                };
+                return;
+            }
+
+            if (historicalOverallStats?.sumInput > 0) {
+                resolved[modelKey] = {
+                    outputRatio: historicalOverallStats.outputRatio,
+                    ratioSource: 'historical_overall',
+                    stats: historicalOverallStats
+                };
+                return;
+            }
+
+            resolved[modelKey] = {
+                outputRatio: defaultRatio,
+                ratioSource: 'default',
+                stats: null
+            };
+        });
+
+        return resolved;
+    }
+
+    function calculatePersonalPriceRows({ totalInput, hitRates, modelRatios }) {
         return hitRates.map(hitRate => {
             const hitTokens = totalInput * hitRate;
             const missTokens = totalInput - hitTokens;
             const models = Object.entries(PERSONAL_PRICE_MODELS).map(([modelName, pricing]) => {
+                const ratioInfo = modelRatios?.[modelName] || { outputRatio: DEFAULT_PERSONAL_PRICE_OUTPUT_RATIO, ratioSource: 'default', stats: null };
+                const predictedOutput = totalInput * ratioInfo.outputRatio;
                 const inputCost = roundPredictionValue((hitTokens * pricing.hitPrice + missTokens * pricing.missPrice) / TOKEN_PRICE_UNIT);
                 const outputCost = roundPredictionValue((predictedOutput * pricing.outputPrice) / TOKEN_PRICE_UNIT);
                 return {
                     modelName,
+                    outputRatio: ratioInfo.outputRatio,
+                    ratioSource: ratioInfo.ratioSource,
+                    predictedOutput,
                     inputCost,
                     outputCost,
                     totalCost: roundPredictionValue(inputCost + outputCost)
@@ -264,31 +386,42 @@
                 hitRate,
                 hitTokens,
                 missTokens,
-                predictedOutput,
                 models
             };
         });
     }
 
-    function buildPersonalPriceDebugInfo({ spanKey, totalInput, hitRates, stats }) {
+    function buildPersonalPriceDebugInfo({ spanKey, totalInput, hitRates, stats, currentScopeStats, historicalScopeStats, modelRatios }) {
+        const normalizedCurrentScopeStats = currentScopeStats || {
+            overallStats: stats,
+            modelStats: null
+        };
+        const normalizedHistoricalScopeStats = historicalScopeStats || {
+            overallStats: stats,
+            modelStats: null
+        };
         return {
             dataSource: '/api/v0/usage/amount',
             referenceSpanKey: spanKey,
             referenceSpanLabel: getSpanLabel(spanKey),
-            referenceDayCount: stats.dayCount,
+            referenceDayCount: normalizedCurrentScopeStats.overallStats.dayCount,
             referenceDateRange: {
-                start: stats.dateRangeStart,
-                end: stats.dateRangeEnd
+                start: normalizedCurrentScopeStats.overallStats.dateRangeStart,
+                end: normalizedCurrentScopeStats.overallStats.dateRangeEnd
             },
-            sampleHitTokens: stats.sumHit,
-            sampleMissTokens: stats.sumMiss,
-            sampleInputTokens: stats.sumInput,
-            sampleOutputTokens: stats.sumOutput,
-            outputInputRatio: stats.outputRatio,
+            sampleHitTokens: normalizedCurrentScopeStats.overallStats.sumHit,
+            sampleMissTokens: normalizedCurrentScopeStats.overallStats.sumMiss,
+            sampleInputTokens: normalizedCurrentScopeStats.overallStats.sumInput,
+            sampleOutputTokens: normalizedCurrentScopeStats.overallStats.sumOutput,
+            outputInputRatio: normalizedCurrentScopeStats.overallStats.outputRatio,
             requestedTotalInputTokens: totalInput,
             requestedHitRatesPercent: hitRates.map(rate => roundPredictionValue(rate * 100)),
             priceUnit: 'CNY / 1M tokens',
-            modelPricing: PERSONAL_PRICE_MODELS
+            modelPricing: PERSONAL_PRICE_MODELS,
+            currentScopeModelStats: normalizedCurrentScopeStats.modelStats,
+            historicalScopeOverallStats: normalizedHistoricalScopeStats.overallStats,
+            historicalScopeModelStats: normalizedHistoricalScopeStats.modelStats,
+            resolvedModelRatios: modelRatios
         };
     }
 
@@ -296,9 +429,11 @@
         const rowSummary = rows.flatMap(row => row.models.map(model => ({
             hitRatePercent: roundPredictionValue(row.hitRate * 100),
             model: model.modelName,
+            ratioSource: model.ratioSource,
+            outputInputRatio: model.outputRatio,
             hitTokens: Math.round(row.hitTokens),
             missTokens: Math.round(row.missTokens),
-            predictedOutputTokens: Math.round(row.predictedOutput),
+            predictedOutputTokens: Math.round(model.predictedOutput),
             inputCostCny: model.inputCost,
             outputCostCny: model.outputCost,
             totalCostCny: model.totalCost
@@ -314,6 +449,19 @@
 
         console.info('[个性化价格预测] 参考信息', debugInfo);
         console.info('[个性化价格预测] 计算结果', rowSummary);
+    }
+
+    function buildPersonalPriceNoticeHtml(modelRatios, theme) {
+        const lines = Object.entries(modelRatios).map(([modelKey, ratioInfo]) => {
+            const sourceLabel = PERSONAL_PRICE_RATIO_SOURCE_LABELS[ratioInfo.ratioSource] || ratioInfo.ratioSource;
+            const prefix = ratioInfo.ratioSource === 'current_model' ? `${modelKey}` : `${modelKey} 已回退到${sourceLabel}，`;
+            const spanDetail = ratioInfo.stats?.dateRangeStart && ratioInfo.stats?.dateRangeEnd
+                ? `（${ratioInfo.stats.dateRangeStart} ~ ${ratioInfo.stats.dateRangeEnd}）`
+                : '';
+            return `<div style="font-size:12px; line-height:1.6; color:${theme.textMuted};">${prefix} 输出/输入比 ${(ratioInfo.outputRatio * 100).toFixed(2)}% ${spanDetail}</div>`;
+        });
+
+        return `<div style="margin-bottom:12px; padding:10px 12px; border-radius:10px; border:1px solid ${theme.rowBorder}; background:${theme.tableHeadBg};">${lines.join('')}</div>`;
     }
 
     function getPersonalPriceTheme() {
@@ -383,7 +531,7 @@
         modal.style.cssText = `position: relative; width: min(560px, 100%); max-height: calc(100vh - 48px); overflow: hidden; background: ${theme.panelBg}; border: 1px solid ${theme.border}; border-radius: 14px; padding: 20px; box-shadow: 0 24px 64px rgba(0,0,0,0.28); display: flex; flex-direction: column; gap: 16px; color: ${theme.textMain};`;
         modal.addEventListener('click', e => e.stopPropagation());
         const title = document.createElement('div');
-        title.innerHTML = `<div style="font-size:16px;font-weight:600;color:${theme.textMain};">个性化价格预测</div><div style="margin-top:4px;font-size:12px;color:${theme.textMuted};">基于当前统计数据估算不同命中率下的成本区间。</div>`;
+        title.innerHTML = `<div style="font-size:16px;font-weight:600;color:${theme.textMain};">个性化价格预测</div><div style="margin-top:4px;font-size:12px;color:${theme.textMuted};">基于当前个人用量的统计数据估算不同命中率下的成本区间。</div>`;
         modal.appendChild(title);
         const closeBtn = document.createElement('button');
         closeBtn.textContent = '×';
@@ -392,9 +540,8 @@
         modal.appendChild(closeBtn);
         const inputDiv = document.createElement('div');
         inputDiv.style.cssText = 'display:flex; flex-wrap:wrap; gap:12px;';
-        inputDiv.innerHTML = `<label style="display:flex; flex-direction:column; gap:6px; flex:1 1 220px; font-size:12px; color:${theme.textMuted};">预计总输入 token<input type="text" inputmode="numeric" id="predict-total-input" value="2000000" style="width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px; border:1px solid ${theme.border}; background:${theme.inputBg}; color:${theme.textMain};"/></label><label style="display:flex; flex-direction:column; gap:6px; flex:1 1 220px; font-size:12px; color:${theme.textMuted};">命中率档位（逗号分隔 %）<input type="text" id="predict-hit-rates" value="90,95,99" style="width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px; border:1px solid ${theme.border}; background:${theme.inputBg}; color:${theme.textMain};"/></label>`;
+        inputDiv.innerHTML = `<label style="display:flex; flex-direction:column; gap:6px; flex:1 1 220px; font-size:12px; color:${theme.textMuted};">预计总输入 token<input type="text" inputmode="numeric" id="predict-total-input" value="${getDefaultPredictTotalInputValue()}" style="width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px; border:1px solid ${theme.border}; background:${theme.inputBg}; color:${theme.textMain};"/></label><label style="display:flex; flex-direction:column; gap:6px; flex:1 1 220px; font-size:12px; color:${theme.textMuted};">命中率档位（逗号分隔 %）<input type="text" id="predict-hit-rates" value="90,95,99" style="width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px; border:1px solid ${theme.border}; background:${theme.inputBg}; color:${theme.textMain};"/></label>`;
         modal.appendChild(inputDiv);
-        bindPredictTotalInputFormatting(document.getElementById('predict-total-input'));
         const tableDiv = document.createElement('div');
         tableDiv.id = 'predict-price-table';
         tableDiv.style.cssText = 'max-height:min(360px, 52vh); overflow:auto; padding-right:4px;';
@@ -407,6 +554,7 @@
         modal.appendChild(genBtn);
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+        bindPredictTotalInputFormatting(document.getElementById('predict-total-input'));
         document.body.style.overflow = 'hidden';
         document.addEventListener('keydown', handlePersonalPriceModalEscape);
     }
@@ -418,20 +566,26 @@
             .map(x => Number(x.trim()) / 100)
             .filter(x => x >= 0 && x <= 1);
         if (!totalInput || hitRates.length === 0) return;
-        const amountBiz = capturedAmountData?.data?.biz_data;
-        if (!amountBiz || !amountBiz.days) return;
-        const filteredAmountDays = getFilteredAmountDays(amountBiz.days, currentSpan);
-        const stats = buildPersonalPriceStats(filteredAmountDays);
-        const rows = calculatePersonalPriceRows({ totalInput, hitRates, outputRatio: stats.outputRatio });
-        const debugInfo = buildPersonalPriceDebugInfo({ spanKey: currentSpan, totalInput, hitRates, stats });
+        const allAmountDays = capturedAmountData?.data?.biz_data?.days || [];
+        const filteredAmountDays = getFilteredAmountDays(allAmountDays, currentSpan);
+        const currentScopeStats = buildPersonalPriceScopeStats(filteredAmountDays);
+        const historicalScopeStats = buildPersonalPriceScopeStats(allAmountDays);
+        const modelRatios = resolvePersonalPriceModelRatios({
+            currentSpanModelStats: currentScopeStats.modelStats,
+            currentSpanOverallStats: currentScopeStats.overallStats,
+            historicalModelStats: historicalScopeStats.modelStats,
+            historicalOverallStats: historicalScopeStats.overallStats
+        });
+        const rows = calculatePersonalPriceRows({ totalInput, hitRates, modelRatios });
+        const debugInfo = buildPersonalPriceDebugInfo({ spanKey: currentSpan, totalInput, hitRates, currentScopeStats, historicalScopeStats, modelRatios });
         logPersonalPriceDebugInfo(debugInfo, rows);
         const tableDiv = document.getElementById('predict-price-table');
         const theme = getPersonalPriceTheme();
-        tableDiv.innerHTML = '';
+        tableDiv.innerHTML = buildPersonalPriceNoticeHtml(modelRatios, theme);
         rows.forEach(row => {
             const tbl = document.createElement('table');
             tbl.style.cssText = `width:100%; border-collapse: collapse; margin-bottom:12px; border:1px solid ${theme.rowBorder}; border-radius:10px; overflow:hidden;`;
-            tbl.innerHTML = `<thead><tr><th colspan="4" style="text-align:left;padding:8px 10px;background:${theme.tableHeadBg};color:${theme.textMain};font-size:12px;">命中率: ${(row.hitRate * 100).toFixed(2)}%</th></tr><tr><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">模型</th><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">输入成本</th><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">输出成本</th><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">总花费</th></tr></thead><tbody></tbody>`;
+            tbl.innerHTML = `<thead><tr><th colspan="4" style="text-align:left;padding:8px 10px;background:${theme.tableHeadBg};color:${theme.textMain};font-size:12px;">命中率: ${(row.hitRate * 100).toFixed(2)}%</th></tr><tr><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">模型</th><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">输入成本</th><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">输出成本</th><th style="padding:8px 10px;text-align:left;font-size:12px;color:${theme.textMuted};">预计总花费</th></tr></thead><tbody></tbody>`;
             const tbody = tbl.querySelector('tbody');
             row.models.forEach(model => {
                 const tr = document.createElement('tr');
